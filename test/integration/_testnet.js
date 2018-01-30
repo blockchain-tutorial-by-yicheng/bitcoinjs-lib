@@ -1,8 +1,10 @@
+
+// 修改相關Endpoint
 var async = require('async')
 var bitcoin = require('../../')
 var Blockchain = require('cb-http-client')
 var coinSelect = require('coinselect')
-var dhttp = require('dhttp/200')
+var dhttp = require('dhttp')
 var typeforce = require('typeforce')
 var types = require('../../src/types')
 
@@ -13,86 +15,87 @@ var keyPair = bitcoin.ECPair.fromWIF('cQqjeq2rxqwnqwMewJhkNtJDixtX8ctA4bYoWHdxY4
 var kpAddress = keyPair.getAddress()
 var conflicts = {}
 
-function fundAddress (unspents, outputs, callback) {
-  // avoid too-long-mempool-chain
+function fundAddress(unspents, outputs, callback) {
+// avoid too-long-mempool-chain
   unspents = unspents.filter(function (x) {
-    return x.confirmations > 0 && !conflicts[x.txId + x.vout]
-  })
+  return x.confirmations > 0 && !conflicts[x.txId + x.vout]
+})
 
-  var result = coinSelect(unspents, outputs, 10)
-  if (!result.inputs) return callback(new Error('Faucet empty'))
+var result = coinSelect(unspents, outputs, 10)
+if (!result.inputs) return callback(new Error('Faucet empty'))
 
-  var txb = new bitcoin.TransactionBuilder(kpNetwork)
+var txb = new bitcoin.TransactionBuilder(kpNetwork)
   result.inputs.forEach(function (x) {
-    conflicts[x.txId + x.vout] = true
-    txb.addInput(x.txId, x.vout)
-  })
+  conflicts[x.txId + x.vout] = true
+  txb.addInput(x.txId, x.vout)
+})
 
-  result.outputs.forEach(function (x) {
-    if (x.address) console.warn('funding ' + x.address + ' w/ ' + x.value)
-    txb.addOutput(x.address || kpAddress, x.value)
-  })
+result.outputs.forEach(function (x) {
+  if (x.address) console.warn('funding ' + x.address + ' w/ ' + x.value)
+  txb.addOutput(x.address || kpAddress, x.value)
+})
 
-  result.inputs.forEach(function (_, i) {
-    txb.sign(i, keyPair)
-  })
+result.inputs.forEach(function (_, i) {
+  txb.sign(i, keyPair)
+})
 
-  var tx = txb.build()
+var tx = txb.build()
 
-  blockchain.transactions.propagate(tx.toHex(), function (err) {
-    if (err) return callback(err)
-
+ blockchain.transactions.propagate(tx.toHex(), function (err) {
+  if (err) return callback(err)
     var txId = tx.getId()
     callback(null, outputs.map(function (x, i) {
-      return { txId: txId, vout: i, value: x.value }
-    }))
+    return { txId: txId, vout: i, value: x.value }
+   }))
+ })
+}
+
+blockchain.faucetMany = function faucetMany(outputs, callback) {
+blockchain.addresses.unspents(kpAddress, function (err, unspents) {
+  if (err) return callback(err)
+
+  typeforce([{
+    txId: types.Hex,
+    vout: types.UInt32,
+    value: types.Satoshi
+  }], unspents)
+
+  fundAddress(unspents, outputs, callback)
   })
 }
 
-blockchain.faucetMany = function faucetMany (outputs, callback) {
-  blockchain.addresses.unspents(kpAddress, function (err, unspents) {
-    if (err) return callback(err)
-
-    typeforce([{
-      txId: types.Hex,
-      vout: types.UInt32,
-      value: types.Satoshi
-    }], unspents)
-
-    fundAddress(unspents, outputs, callback)
-  })
-}
-
-blockchain.faucet = function faucet (address, value, callback) {
+blockchain.faucet = function faucet(address, value, callback) {
   blockchain.faucetMany([{ address: address, value: value }], function (err, unspents) {
-    callback(err, unspents && unspents[0])
+  callback(err, unspents && unspents[0])
   })
 }
 
 // verify TX was accepted
-blockchain.verify = function verify (address, txId, value, done) {
+blockchain.verify = function verify(address, txId, value, done) {
   async.retry(5, function (callback) {
     setTimeout(function () {
-      // check that the above transaction included the intended address
-      dhttp({
-        method: 'POST',
-        url: 'https://api.ei8ht.com.au:9443/3/txs',
-        body: [txId]
-      }, function (err, result) {
-        if (err) return callback(err)
-        if (!result[txId]) return callback(new Error('Could not find ' + txId))
-        callback()
-      })
-    }, 400)
+    // check that the above transaction included the intended address
+    dhttp({
+      method: 'get',
+      url: 'https://testnet-api.smartbit.com.au/v1/blockchain/tx/' + txId
+    }, function (err, result) {
+    if (result.body.success === false) return callback(new Error(result.body.error.message))
+    if (result.body.transaction.txid !== txId) return callback(new Error('Could not find ' + txId))
+      callback()
+    })
+  }, 400)
   }, done)
 }
 
-blockchain.transactions.propagate = function broadcast (txHex, callback) {
-  dhttp({
-    method: 'POST',
-    url: 'https://api.ei8ht.com.au:9443/3/pushtx',
-    body: txHex
-  }, callback)
+blockchain.transactions.propagate = function broadcast(txHex, callback) {
+dhttp({
+  method: 'POST',
+  url: 'https://testnet-api.smartbit.com.au/v1/blockchain/pushtx',
+  body: JSON.stringify({ hex: txHex })
+}, function (err, response) {
+  if (response.body.success === false) err = new Error(response.body.error.message)
+  callback(err, response)
+})
 }
 
 blockchain.RETURN_ADDRESS = kpAddress
